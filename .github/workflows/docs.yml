@@ -1,0 +1,112 @@
+# Publish https://byvfx.github.io/clippa-docs/ from byvfx/clippa main.
+# byvfx/clippa is public, so this clones it with no token and no secret.
+# A published SHA is stored in this repo's Actions cache. A manual run always builds.
+name: docs
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.remote.outputs.sha }}
+      deploy: ${{ steps.gate.outputs.deploy }}
+      cache_hit: ${{ steps.cache.outputs.cache-hit }}
+    steps:
+      - name: Read byvfx/clippa main
+        id: remote
+        run: |
+          sha=$(git ls-remote https://github.com/byvfx/clippa.git refs/heads/main | awk '{print $1}')
+          if [ -z "$sha" ]; then
+            echo "Could not read byvfx/clippa main"
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "byvfx/clippa main $sha"
+
+      - name: Has this SHA already been published?
+        id: cache
+        uses: actions/cache/restore@v6
+        with:
+          path: published-sha
+          key: clippa-docs-${{ steps.remote.outputs.sha }}
+          lookup-only: true
+
+      - name: Decide
+        id: gate
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+            echo "Manual run: building ${{ steps.remote.outputs.sha }}"
+          elif [ "${{ steps.cache.outputs.cache-hit }}" = "true" ]; then
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+            echo "byvfx/clippa main is unchanged (${{ steps.remote.outputs.sha }}). Skipping the build."
+          else
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+            echo "New clippa main ${{ steps.remote.outputs.sha }}. Building."
+          fi
+
+      - name: Clone byvfx/clippa
+        if: steps.gate.outputs.deploy == 'true'
+        run: git clone --depth 1 --branch main https://github.com/byvfx/clippa.git clippa
+
+      - uses: actions/setup-python@v7
+        if: steps.gate.outputs.deploy == 'true'
+        with:
+          python-version: "3.12"
+
+      - name: Install MkDocs Material
+        if: steps.gate.outputs.deploy == 'true'
+        working-directory: clippa
+        run: pip install -r requirements-docs.txt
+
+      - name: Build the docs site
+        if: steps.gate.outputs.deploy == 'true'
+        working-directory: clippa
+        env:
+          NO_MKDOCS_2_WARNING: "1"
+        run: mkdocs build --strict
+
+      - name: Upload Pages artifact
+        if: steps.gate.outputs.deploy == 'true'
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: clippa/site
+
+  deploy:
+    needs: build
+    if: needs.build.outputs.deploy == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Configure Pages
+        uses: actions/configure-pages@v6
+        with:
+          enablement: false
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
+      - name: Record the published SHA
+        if: needs.build.outputs.cache_hit != 'true'
+        run: echo "${{ needs.build.outputs.sha }}" > published-sha
+      - name: Remember the published SHA
+        if: needs.build.outputs.cache_hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: published-sha
+          key: clippa-docs-${{ needs.build.outputs.sha }}
